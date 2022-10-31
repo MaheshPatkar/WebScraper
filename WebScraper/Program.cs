@@ -1,32 +1,35 @@
-﻿using ClosedXML.Excel;
-using HtmlAgilityPack;
+﻿using HtmlAgilityPack;
 using Newtonsoft.Json;
 using System.Collections.Concurrent;
-using System.Reflection;
-using System.Text.RegularExpressions;
 using WebScraper;
 
 public class Program
 {
-    private const string baseUrl = "https://www.horeca.com";
-    private const string errorMessage = "Data Not available";
+
     public static async Task Main(string[] args)
     {
         int pageNumber = 1;
         string conbisteamerurl = $"/en/categorie/3621/combi-steamers?page={pageNumber}";
-        string response = await CallUrl(baseUrl + conbisteamerurl);
-        List<ProductModel> parsedData = new();
+        string response = await Helper.Get(Constants.baseUrl + conbisteamerurl);
+        List<ProductModel> parsedData = new List<ProductModel>();
         if (!string.IsNullOrWhiteSpace(response))
         {
             while (!string.IsNullOrWhiteSpace(response))
             {
-                parsedData.AddRange(await ParseHtml(response));
+                var products = await ParseHtml(response);
+                if(!products.Any())
+                {
+                    break;
+                }
+                parsedData.AddRange(products);
                 conbisteamerurl = $"/en/categorie/3621/combi-steamers?page={++pageNumber}";
-                response = await CallUrl(baseUrl + conbisteamerurl);
+                response = await Helper.Get(Constants.baseUrl + conbisteamerurl);
             }
+            Console.WriteLine("Data Extraction Completed");
             if (parsedData.Any())
             {
-                WriteListToExcel(parsedData);
+                Console.WriteLine("Exporting Data in to Excel");
+                Helper.WriteListToExcel(parsedData, Constants.path);    
             }
             else
             {
@@ -37,18 +40,25 @@ public class Program
         {
             Console.WriteLine("Either the webpage is down or the url has changed");
         }
-        _ = Console.ReadLine();
+        Console.ReadLine();
     }
 
+    /// <summary>
+    /// Parse the Html to return Product Data
+    /// </summary>
+    /// <param name="html"></param>
+    /// <returns></returns>
     private static async Task<List<ProductModel>> ParseHtml(string html)
     {
         HtmlDocument htmlDoc = new();
         htmlDoc.LoadHtml(html);
-        ConcurrentBag<ProductModel> products = new();
+        ConcurrentBag<ProductModel> products = new ConcurrentBag<ProductModel>();
         List<HtmlNode>? nodes = htmlDoc.DocumentNode.SelectNodes("//a[@class='my-2 fw-bolder text-dark']")?.ToList();
 
         if (nodes != null)
         {
+            Console.WriteLine("Data Extraction Started");
+
             ParallelOptions parallelOptions = new()
             {
                 MaxDegreeOfParallelism = 5
@@ -63,6 +73,11 @@ public class Program
         return products.ToList();
     }
 
+    /// <summary>
+    /// GetProductData From HtmlNode
+    /// </summary>
+    /// <param name="node"></param>
+    /// <returns></returns>
     private static async Task<ProductModel> GetProductFromNode(HtmlNode node)
     {
         ProductModel product = new()
@@ -72,7 +87,7 @@ public class Program
         };
 
         //API Call to fetch the element level information
-        string response = await CallUrl(baseUrl + product.ProductUrl);
+        string response = await Helper.Get(Constants.baseUrl + product.ProductUrl);
 
         if (!string.IsNullOrEmpty(response))
         {
@@ -83,7 +98,7 @@ public class Program
 
             if (availabilityUrl != null)
             {
-                GetJsonResponse? availabilityresponse = JsonConvert.DeserializeObject<GetJsonResponse>(await CallUrl(baseUrl + availabilityUrl));
+                GetJsonResponse? availabilityresponse = JsonConvert.DeserializeObject<GetJsonResponse>(await Helper.Get(Constants.baseUrl + availabilityUrl));
 
                 if (availabilityresponse != null && availabilityresponse.Success && availabilityresponse.Data != null)
                 {
@@ -92,12 +107,12 @@ public class Program
                 }
                 else
                 {
-                    product.Availability = errorMessage;
+                    product.Availability = Constants.errorMessage;
                 }
             }
             else
             {
-                product.Availability = errorMessage;
+                product.Availability = Constants.errorMessage;
             }
 
             string? shippingCostsUrl = htmlSubDoc.DocumentNode.SelectSingleNode("//div[@class='hide position-absolute shipping-costs-destination mt-2 p-3 me-3']")?.Attributes["data-url"].Value;
@@ -111,15 +126,15 @@ public class Program
                     { "postalCode", "" }
                 };
 
-                PostJsonResponse? shippingCostsresponse = JsonConvert.DeserializeObject<PostJsonResponse>(await PostUrl(baseUrl + shippingCostsUrl, data));
+                PostJsonResponse? shippingCostsresponse = JsonConvert.DeserializeObject<PostJsonResponse>(await Helper.Post(Constants.baseUrl + shippingCostsUrl, data));
 
                 product.Shippingcosts = shippingCostsresponse != null && shippingCostsresponse.Success
-                    ? RemoveSpecialCharacters(shippingCostsresponse.Costs)
-                    : errorMessage;
+                    ? Helper.RemoveSpecialCharacters(shippingCostsresponse.Costs)
+                    : Constants.errorMessage;
             }
             else
             {
-                product.Shippingcosts = errorMessage;
+                product.Shippingcosts = Constants.errorMessage;
             }
 
             product.Deliverytime = htmlSubDoc.DocumentNode.SelectSingleNode("//div[@id='deliveryTime']")?.ChildNodes["a"].ChildNodes[0].InnerText;
@@ -127,85 +142,28 @@ public class Program
 
             if (string.IsNullOrWhiteSpace(product.ProductNumber))
             {
-                product.ProductNumber = RemoveSpecialCharacters(htmlSubDoc.DocumentNode.SelectSingleNode("//span[@class='d-none d-md-inline-block pe-2 border-end']")?.ChildNodes["span"]?.InnerText);
+                product.ProductNumber = Helper.RemoveSpecialCharacters(htmlSubDoc.DocumentNode.SelectSingleNode("//span[@class='d-none d-md-inline-block pe-2 border-end']")?.ChildNodes["span"]?.InnerText);
             }
         }
         else
         {
-            product.Availability = errorMessage;
-            product.Deliverytime = errorMessage;
-            product.Shippingcosts = errorMessage;
-            product.ProductNumber = errorMessage;
-            product.Price = errorMessage;
+            product.Availability = Constants.errorMessage;
+            product.Deliverytime = Constants.errorMessage;
+            product.Shippingcosts = Constants.errorMessage;
+            product.ProductNumber = Constants.errorMessage;
+            product.Price = Constants.errorMessage;
         }
         return product;
     }
 
-    private static async Task<string> CallUrl(string fullUrl)
-    {
-        try
-        {
-            HttpClient client = new();
-            string response = await client.GetStringAsync(fullUrl);
-            return response;
-        }
-        catch
-        {
-            return "";
-        }
-    }
 
 
-    private static async Task<string> PostUrl(string fullUrl, Dictionary<string, string> body)
-    {
-        try
-        {
-            HttpClient client = new();
-            HttpResponseMessage responseMessage = await client.PostAsync(fullUrl, new FormUrlEncodedContent(body)); ;
-            return await responseMessage.Content.ReadAsStringAsync();
-        }
-        catch
-        {
-            return "";
-        }
-    }
 
 
-    public static string RemoveSpecialCharacters(string? str)
-    {
-        return string.IsNullOrWhiteSpace(str) ? string.Empty : Regex.Replace(str, "[^a-zA-Z0-9_.]+", "", RegexOptions.Compiled);
-    }
 
-    public static void WriteListToExcel(List<ProductModel> list)
-    {
-        try
-        {
-            XLWorkbook workbook = new();
-            _ = workbook.AddWorksheet("CombiSteamers");
-            IXLWorksheet ws = workbook.Worksheet("CombiSteamers");
 
-            PropertyInfo[] properties = list.First().GetType().GetProperties();
-            List<string> headerNames = properties.Select(prop => prop.Name).ToList();
 
-            _ = ws.FirstRow().Style.Font.SetBold();
-            _ = ws.FirstRow().Style.Border.SetOutsideBorder(XLBorderStyleValues.Thick);
-            _ = ws.FirstRow().Style.Fill.SetBackgroundColor(XLColor.Yellow);
 
-            for (int i = 0; i < headerNames.Count; i++)
-            {
-                ws.Cell(1, i + 1).Value = headerNames[i];
-            }
-
-            _ = ws.Cell(2, 1).InsertData(list);
-            _ = ws.Columns().AdjustToContents();
-
-            workbook.SaveAs(@"D:\ExportedExcel.xlsx");
-        }
-        catch (Exception e)
-        {
-            Console.WriteLine(e.Message);
-        }
-    }
 
 
 
